@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -105,31 +106,26 @@ func NewTerminal(app *tview.Application, advancedMode bool) *Terminal {
 		}
 	})
 
-	// Handle Alt+C to cancel current command
-	t.App.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyCtrlC && event.Modifiers()&tcell.ModAlt != 0 {
-			if t.currentCmd != nil && t.currentCmd.Process != nil {
-				close(t.cmdCancelCh)
-				return nil
-			}
-		}
-		return event
-	})
-
 	return t
 }
 
 // ExecuteCommand executes a command in the terminal.
-func (t *Terminal) ExecuteCommand(cmdStr string) {
+func (t *Terminal) ExecuteCommand(cmdStr string) chan string {
+	resultChan := make(chan string)
+
 	if cmdStr == "" {
-		return
+		close(resultChan)
+		return resultChan
 	}
 
 	cmdStrLower := strings.ToLower(cmdStr)
 	if strings.Contains(cmdStrLower, "cls") || strings.Contains(cmdStrLower, "clear") || strings.Contains(cmdStrLower, "clear-host") {
-		t.Output.SetText("")
-		t.Input.SetText("")
-		return
+		t.App.QueueUpdateDraw(func() {
+			t.Output.SetText("")
+			t.Input.SetText("")
+		})
+		close(resultChan)
+		return resultChan
 	}
 
 	t.Input.SetText("")
@@ -138,6 +134,9 @@ func (t *Terminal) ExecuteCommand(cmdStr string) {
 	t.cmdCancelCh = make(chan struct{})
 
 	go func() {
+		defer close(resultChan)
+		var innerWg sync.WaitGroup
+
 		var shell, flag string
 		if runtime.GOOS == "windows" {
 			shell = "powershell"
@@ -150,14 +149,17 @@ func (t *Terminal) ExecuteCommand(cmdStr string) {
 
 		t.currentCmd = exec.Command(shell, flag, cmdStr)
 
+		var stdoutBuf, stderrBuf strings.Builder
+
 		stdoutPipe, err := t.currentCmd.StdoutPipe()
 		if err != nil {
 			t.App.QueueUpdateDraw(func() {
 				t.Output.Write([]byte("[red]创建StdoutPipe失败: [white]" + err.Error() + "\n"))
 				if t.autoScroll {
-					t.Output.ScrollToEnd()
-				}
-			})
+						t.Output.ScrollToEnd()
+					}
+				})
+			resultChan <- "Error: " + err.Error()
 			return
 		}
 		stderrPipe, err := t.currentCmd.StderrPipe()
@@ -165,16 +167,21 @@ func (t *Terminal) ExecuteCommand(cmdStr string) {
 			t.App.QueueUpdateDraw(func() {
 				t.Output.Write([]byte("[red]创建StderrPipe失败: [white]" + err.Error() + "\n"))
 				if t.autoScroll {
-					t.Output.ScrollToEnd()
-				}
-			})
+						t.Output.ScrollToEnd()
+					}
+				})
+			resultChan <- "Error: " + err.Error()
 			return
 		}
+		innerWg.Add(3)
 
 		go func() {
+			defer innerWg.Done()
 			scanner := bufio.NewScanner(stdoutPipe)
 			for scanner.Scan() {
 				line := scanner.Bytes()
+				stdoutBuf.Write(line)
+				stdoutBuf.WriteByte('\n')
 				t.App.QueueUpdateDraw(func() {
 					t.Output.Write(append(line, '\n'))
 					t.Output.ScrollToEnd()
@@ -185,6 +192,8 @@ func (t *Terminal) ExecuteCommand(cmdStr string) {
 					errors.Is(err, os.ErrClosed) ||
 					errors.Is(err, syscall.EBADF) {
 					if data := scanner.Bytes(); len(data) > 0 {
+						stdoutBuf.Write(data)
+						stdoutBuf.WriteByte('\n')
 						t.App.QueueUpdateDraw(func() {
 							t.Output.Write(append(data, '\n'))
 							t.Output.ScrollToEnd()
@@ -199,9 +208,12 @@ func (t *Terminal) ExecuteCommand(cmdStr string) {
 			}
 		}()
 		go func() {
+			defer innerWg.Done()
 			scanner := bufio.NewScanner(stderrPipe)
 			for scanner.Scan() {
 				line := scanner.Bytes()
+				stderrBuf.Write(line)
+				stderrBuf.WriteByte('\n')
 				t.App.QueueUpdateDraw(func() {
 					t.Output.Write(append(line, '\n'))
 					t.Output.ScrollToEnd()
@@ -212,6 +224,8 @@ func (t *Terminal) ExecuteCommand(cmdStr string) {
 					errors.Is(err, os.ErrClosed) ||
 					errors.Is(err, syscall.EBADF) {
 					if data := scanner.Bytes(); len(data) > 0 {
+						stderrBuf.Write(data)
+						stderrBuf.WriteByte('\n')
 						t.App.QueueUpdateDraw(func() {
 							t.Output.Write(append(data, '\n'))
 							t.Output.ScrollToEnd()
@@ -233,10 +247,17 @@ func (t *Terminal) ExecuteCommand(cmdStr string) {
 					t.Output.ScrollToEnd()
 				}
 			})
+			resultChan <- "Error: " + err.Error()
 			return
 		}
 
 		go func() {
+			defer innerWg.Done()
+			done := make(chan error, 1)
+			go func() {
+				done <- t.currentCmd.Wait()
+			}()
+
 			select {
 			case <-t.cmdCancelCh:
 				if t.currentCmd != nil && t.currentCmd.Process != nil {
@@ -256,9 +277,10 @@ func (t *Terminal) ExecuteCommand(cmdStr string) {
 				}
 			case <-time.After(1 * time.Second):
 				// 等待一秒，如果命令还在运行，则继续等待
+				break
 			}
 
-			if err := t.currentCmd.Wait(); err != nil {
+			if err := <-done; err != nil {
 				t.App.QueueUpdateDraw(func() {
 					if exitError, ok := err.(*exec.ExitError); ok {
 						t.Output.Write([]byte(fmt.Sprintf("[red]命令执行完成，但出现错误: %s (Exit Code: %d)[white]\n", exitError.Error(), exitError.ExitCode())))
@@ -269,6 +291,7 @@ func (t *Terminal) ExecuteCommand(cmdStr string) {
 						t.Output.ScrollToEnd()
 					}
 				})
+				resultChan <- "Error: " + err.Error()
 			} else {
 				t.App.QueueUpdateDraw(func() {
 					t.Output.Write([]byte("[green]命令执行完成。[white]\n"))
@@ -276,34 +299,32 @@ func (t *Terminal) ExecuteCommand(cmdStr string) {
 						t.Output.ScrollToEnd()
 					}
 				})
+				resultChan <- stdoutBuf.String() + stderrBuf.String()
 			}
 			t.currentCmd = nil
 		}()
+		innerWg.Wait()
 	}()
+	return resultChan
 }
-
 // ClearOutput clears the terminal output.
 func (t *Terminal) ClearOutput() {
-	t.App.QueueUpdateDraw(func() {
-		t.Output.SetText("")
-	})
+	t.Output.SetText("")
 }
 
 // WriteOutput writes text to the terminal output.
 func (t *Terminal) WriteOutput(text string) {
-	t.App.QueueUpdateDraw(func() {
-		t.Output.Write([]byte(text))
-		if t.autoScroll {
-			t.Output.ScrollToEnd()
-		}
-	})
+
+	t.Output.Write([]byte(text))
+	if t.autoScroll {
+		t.Output.ScrollToEnd()
+	}
+
 }
 
 // SetInputText sets the text of the input field.
 func (t *Terminal) SetInputText(text string) {
-	t.App.QueueUpdateDraw(func() {
-		t.Input.SetText(text)
-	})
+	t.Input.SetText(text)
 }
 
 // FocusInput sets focus to the input field.

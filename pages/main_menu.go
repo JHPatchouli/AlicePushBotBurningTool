@@ -1,29 +1,39 @@
 package pages
 
 import (
+	"log"
+
 	"AlicePushBotBurningTool/console"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
 
+var mainMenu *tview.Flex
+
 // MainMenu 主菜单页面结构体
 type MainMenu struct {
-	flex        *tview.Flex // 主布局
-	app         *tview.Application
-	title       *tview.TextView      // 工具标题
-	notice      *tview.TextView      // 公告栏
-	list        *tview.List          // 菜单列表
-	footer      *tview.TextView      // 页脚提示
-	pages       *tview.Pages         // 页面管理器
-	easyHandler *console.EasyHandler // 简易模式处理器
+	flex   *tview.Flex // 主布局
+	app    *tview.Application
+	title  *tview.TextView // 工具标题
+	notice *tview.TextView // 公告栏
+	list   *tview.List     // 菜单列表
+	footer *tview.TextView // 页脚提示
+}
+
+func CreateMainMenu(app *tview.Application) {
+	mainMenu = NewMainMenu(app)
+
+	app.SetRoot(mainMenu, true).SetFocus(mainMenu)
+	if err := app.Run(); err != nil {
+		log.Fatalf("Error running application: %v", err)
+	}
 }
 
 // NewMainMenu 创建主菜单实例
-func NewMainMenu(app *tview.Application, pages *tview.Pages) *MainMenu {
+func NewMainMenu(app *tview.Application) *tview.Flex {
 	menu := &MainMenu{
-		app:   app,
-		pages: pages,
+		app: app,
 		flex: tview.NewFlex().
 			SetDirection(tview.FlexRow), // 垂直布局
 	}
@@ -38,12 +48,7 @@ func NewMainMenu(app *tview.Application, pages *tview.Pages) *MainMenu {
 		AddItem(menu.notice, 13, 1, false). // 公告栏（不可聚焦）
 		AddItem(menu.list, 0, 2, true).     // 菜单列表（默认聚焦）
 		AddItem(menu.footer, 1, 1, false)   // 页脚提示（不可聚焦）
-	return menu
-}
-
-// SetEasyHandler 设置简易模式处理器
-func (m *MainMenu) SetEasyHandler(handler *console.EasyHandler) {
-	m.easyHandler = handler
+	return menu.flex
 }
 
 // initTitle 初始化工具标题
@@ -104,55 +109,12 @@ func (m *MainMenu) initFooter() {
 	})
 }
 
-// 实现完整的Primitive接口
-func (m *MainMenu) Blur() {
-	m.list.Blur()
-}
-
-func (m *MainMenu) Draw(screen tcell.Screen) {
-	m.flex.Draw(screen)
-}
-
-func (m *MainMenu) Focus(delegate func(p tview.Primitive)) {
-	delegate(m.list) // 默认聚焦到菜单列表
-}
-
-func (m *MainMenu) GetRect() (int, int, int, int) {
-	return m.flex.GetRect()
-}
-
-func (m *MainMenu) HasFocus() bool {
-	return m.list.HasFocus()
-}
-
-func (m *MainMenu) InputHandler() func(event *tcell.EventKey, setFocus func(p tview.Primitive)) {
-	return m.list.InputHandler()
-}
-
-func (m *MainMenu) MouseHandler() func(action tview.MouseAction, event *tcell.EventMouse, setFocus func(p tview.Primitive)) (consumed bool, capture tview.Primitive) {
-	return m.list.MouseHandler()
-}
-
-func (m *MainMenu) PasteHandler() func(pasted string, setFocus func(p tview.Primitive)) {
-	return m.list.PasteHandler()
-}
-
-func (m *MainMenu) SetRect(x, y, width, height int) {
-	m.flex.SetRect(x, y, width, height)
-}
-
 // 模式选择回调函数
 func (m *MainMenu) onSimpleModeSelected() {
-	if m.easyHandler != nil {
-		// 使用协程避免阻塞主线程
-		go func() {
-			m.easyHandler.HandleEasyManagement()
-			// UI操作需回到主线程
-			m.app.QueueUpdateDraw(func() {
-				m.pages.SwitchToPage("easy_mode")
-			})
-		}()
-	}
+	simpleHandler := console.CreateEasyHandler(m.app, m.flex)
+	simpleModePage := simpleHandler.InitUI()
+	m.app.SetRoot(simpleModePage, true).SetFocus(simpleModePage)
+	simpleHandler.InitDeviceList()
 }
 
 func (m *MainMenu) onAdvancedModeSelected() {
