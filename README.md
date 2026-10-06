@@ -2,10 +2,7 @@
 
 中兴微随身路由的 Webhook 刷入工具。通过 ADB 查询设备，并在终端界面中执行刷入操作。
 
-本仓库不再维护。相关项目：
-
-- [alice-pusher-bot-zxic](https://github.com/Amamiyashi0n/alice-pusher-bot-zxic)：运行于中兴微设备的 Alice Pusher Bot。
-- [alice-nl80211-webui-zxic](https://github.com/Amamiyashi0n/alice-nl80211-webui-zxic)：全新改版。
+本仓库不再维护，且只包含烧录工具。内核项目是 [alice-pusher-bot-zxic](https://github.com/Amamiyashi0n/alice-pusher-bot-zxic)。全新改版为 [alice-nl80211-webui-zxic](https://github.com/Amamiyashi0n/alice-nl80211-webui-zxic)。
 
 ## 当前实现
 
